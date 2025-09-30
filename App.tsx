@@ -1,45 +1,56 @@
-/**
- * Sample React Native App
- * https://github.com/facebook/react-native
- *
- * @format
- */
+import * as React from 'react';
+import { NavigationContainer } from '@react-navigation/native';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { Provider as PaperProvider, MD3LightTheme, IconButton } from 'react-native-paper';
+import { signOut } from 'firebase/auth';
+import { auth } from './firebase';
 
-import { NewAppScreen } from '@react-native/new-app-screen';
-import { StatusBar, StyleSheet, useColorScheme, View } from 'react-native';
-import {
-  SafeAreaProvider,
-  useSafeAreaInsets,
-} from 'react-native-safe-area-context';
+import Logins from './vistas/Logins';
+import HomeTabs from './vistas/HomeTabs';
+import AppNavigator from './navigation/AppNavigator';
 
-function App() {
-  const isDarkMode = useColorScheme() === 'dark';
 
-  return (
-    <SafeAreaProvider>
-      <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
-      <AppContent />
-    </SafeAreaProvider>
-  );
-}
+const Stack = createNativeStackNavigator();
 
-function AppContent() {
-  const safeAreaInsets = useSafeAreaInsets();
-
-  return (
-    <View style={styles.container}>
-      <NewAppScreen
-        templateFileName="App.tsx"
-        safeAreaInsets={safeAreaInsets}
-      />
-    </View>
-  );
-}
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
+const theme = {
+  ...MD3LightTheme,
+  colors: {
+    ...MD3LightTheme.colors,
+    primary: '#1565C0',    // azul profesional
+    secondary: '#00BFA5',  // acento
   },
-});
+};
 
-export default App;
+export default function App() {
+  return (
+    
+    <PaperProvider theme={theme}>
+      <NavigationContainer>
+        <Stack.Navigator>
+          <Stack.Screen
+            name="Login"
+            component={Logins}
+            options={{ headerShown: false }}
+          />
+          <Stack.Screen
+            name="PaginaPrincipal"
+            component={HomeTabs}
+            options={({ navigation }) => ({
+              title: 'App Asilo',
+              headerRight: () => (
+                <IconButton
+                  icon="logout"
+                  onPress={async () => {
+                    await signOut(auth);
+                    navigation.replace('Login');
+                  }}
+                  accessibilityLabel="Cerrar sesión"
+                />
+              ),
+            })}
+          />
+        </Stack.Navigator>
+      </NavigationContainer>
+    </PaperProvider>
+  );
+}
