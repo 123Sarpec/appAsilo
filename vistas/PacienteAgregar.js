@@ -1,6 +1,6 @@
 // vistas/PacienteAgregar.js
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, StyleSheet, Alert, ScrollView } from 'react-native';
+import { View, StyleSheet, Alert, ScrollView, Platform, ToastAndroid } from 'react-native';
 import {
   Appbar,
   Searchbar,
@@ -20,6 +20,9 @@ import {
   TouchableRipple,
 } from 'react-native-paper';
 import { FlatList } from 'react-native';
+
+// === Imprimir/Guardar como PDF (diálogo nativo) ===
+import RNPrint from 'react-native-print';
 
 // Firebase
 import { db, auth } from '../firebase';
@@ -57,6 +60,93 @@ const fmtDate = (ts) => {
       .slice(0, 10);
   } catch {
     return '';
+  }
+};
+
+// ====== Reporte (HTML del PDF) ======
+const kv = (k, v) => `
+  <tr>
+    <td style="padding:6px;border:1px solid #ddd;width:35%;"><b>${k}</b></td>
+    <td style="padding:6px;border:1px solid #ddd;">${v ?? ''}</td>
+  </tr>
+`;
+
+const buildHTMLPaciente = (p = {}) => {
+  const rowsHist =
+    Array.isArray(p.enfermedadesHistorial) && p.enfermedadesHistorial.length
+      ? p.enfermedadesHistorial
+          .map(
+            (h, i) => `
+        <tr>
+          <td style="padding:6px;border:1px solid #ddd;">${i + 1}</td>
+          <td style="padding:6px;border:1px solid #ddd;">${h.diagnostico || ''}</td>
+          <td style="padding:6px;border:1px solid #ddd;">${h.fecha || ''}</td>
+        </tr>
+      `,
+          )
+          .join('')
+      : `<tr><td colspan="3" style="padding:6px;border:1px solid #ddd;color:#777;">Sin registros</td></tr>`;
+
+  return `
+  <html>
+    <head><meta charset="utf-8" /></head>
+    <body style="font-family: Arial, Helvetica, sans-serif; padding: 16px;">
+      <h2 style="margin:0 0 8px 0;">Ficha del Paciente</h2>
+      <p style="margin:0 0 2px 0;"><b>Generado:</b> ${new Date().toLocaleString()}</p>
+      <hr style="margin:12px 0;" />
+
+      <h3 style="margin:12px 0 6px;">Ficha inicial</h3>
+      <table style="border-collapse:collapse;width:100%;">
+        ${kv('Nombre completo', p.nombreCompleto)}
+        ${kv('Fecha de nacimiento', p.fechaNacimiento)}
+        ${kv('DPI', p.dpi)}
+        ${kv('Lugar de nacimiento', p.lugarNacimiento)}
+        ${kv('Fecha de ingreso', p.fechaIngreso || (p.createdAt ? fmtDate(p.createdAt) : ''))}
+        ${kv('Persona que ingresa', p.personaIngresa)}
+        ${kv('Parentesco', p.parentesco)}
+        ${kv('Emergencia (Nombre)', p.emergenciaNombre)}
+        ${kv('Emergencia (Tel.)', p.emergenciaTelefono)}
+        ${kv('Enfermera/médico', p.enfermeraNombre)}
+      </table>
+
+      <h3 style="margin:16px 0 6px;">Ficha médica</h3>
+      <table style="border-collapse:collapse;width:100%;">
+        ${kv('Peso', p.peso)}
+        ${kv('Estatura', p.estatura)}
+        ${kv('Alergias', p.alergias)}
+        ${kv('Estado físico', p.estadoFisico)}
+        ${kv('Enfermedades ', p.enfermedades)}
+        ${kv('Fecha de fallecimiento', p.fechaFallecimiento)}
+        ${kv('Causa de fallecimiento', p.causaFallecimiento)}
+      </table>
+
+      <h3 style="margin:16px 0 6px;">Historial de enfermedades</h3>
+      <table style="border-collapse:collapse;width:100%;border:1px solid #ddd;">
+        <thead>
+          <tr>
+            <th style="padding:6px;border:1px solid #ddd;text-align:left;">#</th>
+            <th style="padding:6px;border:1px solid #ddd;text-align:left;">Diagnóstico</th>
+            <th style="padding:6px;border:1px solid #ddd;text-align:left;">Fecha</th>
+          </tr>
+        </thead>
+        <tbody>${rowsHist}</tbody>
+      </table>
+    </body>
+  </html>`;
+};
+
+// ====== Guardar/Imprimir (diálogo del sistema) ======
+const descargarPDFDesdeModal = async (pac) => {
+  try {
+    const html = buildHTMLPaciente(pac);
+    await RNPrint.print({ html }); // Android: elegir "Guardar como PDF"
+  } catch (e) {
+    console.log('RNPrint error:', e?.message || e);
+    if (Platform.OS === 'android') {
+      ToastAndroid.show('No se pudo abrir el diálogo de impresión.', ToastAndroid.LONG);
+    } else {
+      Alert.alert('Error', 'No se pudo abrir el diálogo de impresión.');
+    }
   }
 };
 
@@ -102,14 +192,20 @@ export default function PacienteAgregar() {
     // Enfermera/médico
     enfermeraId: '',
     enfermeraNombre: '',
+    // Historial dinámico
+    enfermedadesHistorial: [], // [{diagnostico, fecha}]
   });
+
+  // Temporales para agregar al historial
+  const [tmpDiag, setTmpDiag] = useState('');
+  const [tmpFecha, setTmpFecha] = useState('');
 
   // ===== Auth + suscripciones =====
   useEffect(() => {
     let unsubPac, unsubMed;
     const unsubAuth = onAuthStateChanged(auth, (u) => {
       if (!u) {
-        console.log('⚠️ No hay usuario autenticado.');
+        console.log('No hay usuario autenticado.');
         setLoading(false);
         return;
       }
@@ -123,7 +219,7 @@ export default function PacienteAgregar() {
           setLoading(false);
         },
         (err) => {
-          console.log('❌ onSnapshot pacientes:', err);
+          console.log('onSnapshot pacientes:', err);
           setSnack({ visible: true, text: err.code || 'Error' });
           setLoading(false);
         }
@@ -152,8 +248,7 @@ export default function PacienteAgregar() {
   const openCreate = () => {
     setMode('create');
     setCurrentId(null);
-    setForm((s) => ({
-      ...s,
+    setForm({
       nombreCompleto: '',
       fechaNacimiento: '',
       dpi: '',
@@ -172,7 +267,10 @@ export default function PacienteAgregar() {
       causaFallecimiento: '',
       enfermeraId: '',
       enfermeraNombre: '',
-    }));
+      enfermedadesHistorial: [],
+    });
+    setTmpDiag('');
+    setTmpFecha('');
     setVisible(true);
   };
 
@@ -198,8 +296,33 @@ export default function PacienteAgregar() {
       causaFallecimiento: row.causaFallecimiento ?? '',
       enfermeraId: row.enfermeraId ?? '',
       enfermeraNombre: row.enfermeraNombre ?? '',
+      enfermedadesHistorial: Array.isArray(row.enfermedadesHistorial) ? row.enfermedadesHistorial : [],
     });
+    setTmpDiag('');
+    setTmpFecha('');
     setVisible(true);
+  };
+
+  // === Historial: agregar / quitar ===
+  const addHistItem = () => {
+    const diag = tmpDiag.trim();
+    const fecha = (tmpFecha || '').trim();
+    if (!diag) return showSnack('Escribe el diagnóstico.');
+    if (!fecha) return showSnack('Indica la fecha (YYYY-MM-DD).');
+
+    setForm((s) => ({
+      ...s,
+      enfermedadesHistorial: [...(s.enfermedadesHistorial || []), { diagnostico: diag, fecha }],
+    }));
+    setTmpDiag('');
+    setTmpFecha('');
+  };
+
+  const removeHistItem = (idx) => {
+    setForm((s) => ({
+      ...s,
+      enfermedadesHistorial: (s.enfermedadesHistorial || []).filter((_, i) => i !== idx),
+    }));
   };
 
   // Guardar / actualizar
@@ -213,6 +336,9 @@ export default function PacienteAgregar() {
       peso: form.peso !== '' ? Number(form.peso) : '',
       estatura: form.estatura !== '' ? Number(form.estatura) : '',
       fechaIngreso: String(form.fechaIngreso || ''),
+      // Asegurar arreglo
+      enfermedadesHistorial: Array.isArray(form.enfermedadesHistorial) ? form.enfermedadesHistorial : [],
+      updatedAt: serverTimestamp(),
     };
 
     try {
@@ -220,13 +346,13 @@ export default function PacienteAgregar() {
         await addDoc(collection(db, COL_PACIENTES), { ...base, createdAt: serverTimestamp() });
         showSnack('Paciente agregado.');
       } else {
-        await updateDoc(doc(db, COL_PACIENTES, currentId), { ...base, updatedAt: serverTimestamp() });
+        await updateDoc(doc(db, COL_PACIENTES, currentId), base);
         showSnack('Paciente actualizado.');
       }
       setVisible(false);
       setActionRowId(null);
     } catch (e) {
-      console.log('❌ save paciente:', e);
+      console.log(' save paciente:', e);
       showSnack(`Error: ${e.code || ''} ${e.message || ''}`.trim());
     }
   };
@@ -244,7 +370,7 @@ export default function PacienteAgregar() {
             showSnack('Paciente eliminado.');
             setActionRowId(null);
           } catch (e) {
-            console.log('❌ delete paciente:', e);
+            console.log(' delete paciente:', e);
             showSnack('No se pudo eliminar.');
           }
         },
@@ -252,16 +378,27 @@ export default function PacienteAgregar() {
     ]);
   };
 
-  // Filtros
+  // Filtros (incluye historial)
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return items;
-    return items.filter((x) =>
-      [x.nombreCompleto, x.enfermedades, x.fechaIngreso || fmtDate(x.createdAt), x.enfermeraNombre, x.dpi]
+
+    return items.filter((x) => {
+      const hist = (x.enfermedadesHistorial || [])
+        .map((h) => `${h.diagnostico} ${h.fecha}`)
+        .join(' ');
+      return [
+        x.nombreCompleto,
+        x.enfermedades,
+        x.fechaIngreso || fmtDate(x.createdAt),
+        x.enfermeraNombre,
+        x.dpi,
+        hist,
+      ]
         .join(' ')
         .toLowerCase()
-        .includes(q),
-    );
+        .includes(q);
+    });
   }, [items, query]);
 
   const medicosFiltrados = useMemo(() => {
@@ -276,7 +413,7 @@ export default function PacienteAgregar() {
   return (
     <View style={{ flex: 1 }}>
       <Appbar.Header mode="small" elevated>
-        <Appbar.Content title="Pacientes" subtitle="Conectado a Firestore" />
+        <Appbar.Content title="Registros de Pacientes" subtitle="Conectado a Firestore" />
         <Appbar.Action icon="plus" onPress={openCreate} />
       </Appbar.Header>
 
@@ -285,7 +422,8 @@ export default function PacienteAgregar() {
           placeholder="Buscar por nombre, fecha o enfermedad…"
           value={query}
           onChangeText={setQuery}
-          style={{ marginBottom: 10 }}
+                   style={{ marginBottom: 10, backgroundColor: '#0483a04b', borderRadius: 16 }}
+          inputStyle={{ color: '#080808ff' }}
         />
 
         <Card style={styles.card}>
@@ -296,7 +434,6 @@ export default function PacienteAgregar() {
                 <Text style={{ color: '#6B7C87', marginTop: 6 }}>Cargando…</Text>
               </View>
             ) : (
-              // 🔧 Altura garantizada para que la FlatList siempre se vea dentro de tabs
               <View style={{ height: 520 }}>
                 <FlatList
                   data={filtered}
@@ -311,6 +448,12 @@ export default function PacienteAgregar() {
                   }
                   renderItem={({ item: row, index }) => {
                     const active = actionRowId === row.id;
+
+                    const lastHist =
+                      Array.isArray(row.enfermedadesHistorial) && row.enfermedadesHistorial.length
+                        ? row.enfermedadesHistorial[row.enfermedadesHistorial.length - 1]
+                        : null;
+
                     return (
                       <View key={row.id}>
                         <TouchableRipple rippleColor="rgba(0,0,0,0.08)" onPress={() => setActionRowId(active ? null : row.id)}>
@@ -332,7 +475,11 @@ export default function PacienteAgregar() {
                                 </Text>
                               </View>
                               <View style={styles.mailSubtitle}>
-                                {row.enfermedades ? (
+                                {lastHist ? (
+                                  <Chip compact>
+                                    Último: {lastHist.diagnostico} • {lastHist.fecha}
+                                  </Chip>
+                                ) : row.enfermedades ? (
                                   <Chip compact>{row.enfermedades}</Chip>
                                 ) : (
                                   <Text style={{ color: '#94A3B8' }}>Sin enfermedad registrada</Text>
@@ -344,6 +491,7 @@ export default function PacienteAgregar() {
                                 <>
                                   <IconButton icon="pencil" onPress={() => openEdit(row)} />
                                   <IconButton icon="delete" onPress={() => remove(row)} />
+                                  <IconButton icon="chevron-right" onPress={() => openView(row)} />
                                 </>
                               ) : (
                                 <IconButton icon="chevron-right" onPress={() => openView(row)} />
@@ -397,15 +545,74 @@ export default function PacienteAgregar() {
             <Text style={styles.section}>FICHA MÉDICA</Text>
             <TextInput label="Peso (lb/kg)" value={form.peso} onChangeText={(v) => onChange('peso', v)} keyboardType="numeric" style={styles.input} />
             <TextInput label="Estatura" value={form.estatura} onChangeText={(v) => onChange('estatura', v)} keyboardType="numeric" style={styles.input} />
-            <TextInput label="Enfermedades" value={form.enfermedades} onChangeText={(v) => onChange('enfermedades', v)} style={styles.input} />
+            <TextInput label="Enfermedades (texto libre)" value={form.enfermedades} onChangeText={(v) => onChange('enfermedades', v)} style={styles.input} />
             <TextInput label="Alergias" value={form.alergias} onChangeText={(v) => onChange('alergias', v)} style={styles.input} />
             <TextInput label="Estado físico del ingresado" value={form.estadoFisico} onChangeText={(v) => onChange('estadoFisico', v)} multiline style={styles.input} />
             <TextInput label="Fecha de fallecimiento (opcional)" value={form.fechaFallecimiento} onChangeText={(v) => onChange('fechaFallecimiento', v)} style={styles.input} />
             <TextInput label="Causa (opcional)" value={form.causaFallecimiento} onChangeText={(v) => onChange('causaFallecimiento', v)} style={styles.input} />
 
-            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8, marginTop: 8, marginBottom: 6 }}>
-              <Button mode="text" onPress={() => setVisible(false)}>Cancelar</Button>
-              <Button mode="contained" onPress={save}>{mode === 'create' ? 'Guardar' : 'Actualizar'}</Button>
+            {/* === HISTORIAL DE ENFERMEDADES === */}
+            <Text style={styles.section}>HISTORIAL DE ENFERMEDADES</Text>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <View style={{ flex: 2 }}>
+                <TextInput
+                  label="Diagnóstico (ej. Fiebre)"
+                  value={tmpDiag}
+                  onChangeText={setTmpDiag}
+                  style={styles.input}
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <TextInput
+                  label="Fecha (YYYY-MM-DD)"
+                  value={tmpFecha}
+                  onChangeText={setTmpFecha}
+                  style={styles.input}
+                />
+              </View>
+              <View style={{ justifyContent: 'center' }}>
+                <IconButton icon="plus" onPress={addHistItem} />
+              </View>
+            </View>
+
+            {(form.enfermedadesHistorial || []).length === 0 ? (
+              <Text style={{ color: '#6B7C87', marginBottom: 8 }}>Sin registros aún.</Text>
+            ) : (
+              <Card style={{ marginBottom: 10 }}>
+                <Card.Content style={{ paddingTop: 8 }}>
+                  {(form.enfermedadesHistorial || []).map((h, idx) => (
+                    <View
+                      key={`${h.diagnostico}-${h.fecha}-${idx}`}
+                      style={styles.histItem}
+                    >
+                      <Text style={{ flex: 1 }}>
+                        • {h.diagnostico} — {h.fecha}
+                      </Text>
+                      <IconButton
+                        icon="delete"
+                        onPress={() => removeHistItem(idx)}
+                      />
+                    </View>
+                  ))}
+                </Card.Content>
+              </Card>
+            )}
+
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'flex-end',
+                gap: 8,
+                marginTop: 8,
+                marginBottom: 6,
+              }}
+            >
+              <Button mode="text" onPress={() => setVisible(false)}>
+                Cancelar
+              </Button>
+              <Button mode="contained" onPress={save}>
+                {mode === 'create' ? 'Guardar' : 'Actualizar'}
+              </Button>
             </View>
           </ScrollView>
         </Modal>
@@ -413,13 +620,26 @@ export default function PacienteAgregar() {
 
       {/* ==== MODAL: PICKER MÉDICOS ==== */}
       <Portal>
-        <Modal visible={pickerOpen} onDismiss={() => setPickerOpen(false)} contentContainerStyle={styles.pickerModal}>
-          <Text variant="titleMedium" style={{ marginBottom: 8 }}>Seleccionar enfermera/médico</Text>
-          <Searchbar placeholder="Buscar…" value={pickerSearch} onChangeText={setPickerSearch} style={{ marginBottom: 8 }} />
+        <Modal
+          visible={pickerOpen}
+          onDismiss={() => setPickerOpen(false)}
+          contentContainerStyle={styles.pickerModal}
+        >
+          <Text variant="titleMedium" style={{ marginBottom: 8 }}>
+            Seleccionar enfermera/médico
+          </Text>
+          <Searchbar
+            placeholder="Buscar…"
+            value={pickerSearch}
+            onChangeText={setPickerSearch}
+            style={{ marginBottom: 8 }}
+          />
           <Card>
             <Card.Content style={{ paddingTop: 0 }}>
               {medicosFiltrados.length === 0 ? (
-                <Text style={{ color: '#6B7C87', marginVertical: 8 }}>No hay médicos registrados.</Text>
+                <Text style={{ color: '#6B7C87', marginVertical: 8 }}>
+                  No hay médicos registrados.
+                </Text>
               ) : (
                 medicosFiltrados.map((m, i) => (
                   <View key={m.id ?? i}>
@@ -431,9 +651,19 @@ export default function PacienteAgregar() {
                       }}
                     >
                       <View style={styles.pickerItem}>
-                        <Avatar.Text size={32} label={initials(m.nombre)} style={{ marginRight: 10, backgroundColor: '#E2E8F0' }} color="#0F172A" />
+                        <Avatar.Text
+                          size={32}
+                          label={initials(m.nombre)}
+                          style={{
+                            marginRight: 10,
+                            backgroundColor: '#E2E8F0',
+                          }}
+                          color="#0F172A"
+                        />
                         <Text style={{ flex: 1 }}>{m.nombre}</Text>
-                        {m.telefono ? <Chip compact>Tel: {m.telefono}</Chip> : null}
+                        {m.telefono ? (
+                          <Chip compact>Tel: {m.telefono}</Chip>
+                        ) : null}
                       </View>
                     </TouchableRipple>
                     {i < medicosFiltrados.length - 1 && <Divider />}
@@ -450,39 +680,116 @@ export default function PacienteAgregar() {
 
       {/* ==== MODAL: VER DETALLE ==== */}
       <Portal>
-        <Modal visible={viewOpen} onDismiss={() => setViewOpen(false)} contentContainerStyle={styles.modal}>
-          <ScrollView keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator>
-            <Text variant="titleMedium" style={{ marginBottom: 12 }}>Detalle del paciente</Text>
+        <Modal
+          visible={viewOpen}
+          onDismiss={() => setViewOpen(false)}
+          contentContainerStyle={styles.modal}
+        >
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator
+          >
+            <Text variant="titleMedium" style={{ marginBottom: 12 }}>
+              Detalle del paciente
+            </Text>
 
             <Text style={styles.section}>FICHA INICIAL</Text>
             <Detail label="Nombre completo" value={viewRow?.nombreCompleto} />
-            <Detail label="Fecha de nacimiento" value={viewRow?.fechaNacimiento} />
+            <Detail
+              label="Fecha de nacimiento"
+              value={viewRow?.fechaNacimiento}
+            />
             <Detail label="DPI" value={viewRow?.dpi} />
-            <Detail label="Lugar de nacimiento" value={viewRow?.lugarNacimiento} />
-            <Detail label="Fecha de ingreso" value={viewRow?.fechaIngreso || fmtDate(viewRow?.createdAt)} />
-            <Detail label="Persona que ingresa" value={viewRow?.personaIngresa} />
+            <Detail
+              label="Lugar de nacimiento"
+              value={viewRow?.lugarNacimiento}
+            />
+            <Detail
+              label="Fecha de ingreso"
+              value={viewRow?.fechaIngreso || fmtDate(viewRow?.createdAt)}
+            />
+            <Detail
+              label="Persona que ingresa"
+              value={viewRow?.personaIngresa}
+            />
             <Detail label="Parentesco" value={viewRow?.parentesco} />
-            <Detail label="En emergencia (Nombre)" value={viewRow?.emergenciaNombre} />
-            <Detail label="En emergencia (Teléfono)" value={viewRow?.emergenciaTelefono} />
-            <Detail label="Enfermera que realiza el ingreso" value={viewRow?.enfermeraNombre} />
+            <Detail
+              label="En emergencia (Nombre)"
+              value={viewRow?.emergenciaNombre}
+            />
+            <Detail
+              label="En emergencia (Teléfono)"
+              value={viewRow?.emergenciaTelefono}
+            />
+            <Detail
+              label="Enfermera que realiza el ingreso"
+              value={viewRow?.enfermeraNombre}
+            />
 
             <Text style={styles.section}>FICHA MÉDICA</Text>
             <Detail label="Peso" value={String(viewRow?.peso ?? '')} />
             <Detail label="Estatura" value={String(viewRow?.estatura ?? '')} />
-            <Detail label="Enfermedades" value={viewRow?.enfermedades} />
+            <Detail
+              label="Enfermedades (texto libre)"
+              value={viewRow?.enfermedades}
+            />
             <Detail label="Alergias" value={viewRow?.alergias} />
-            <Detail label="Estado físico del ingresado" value={viewRow?.estadoFisico} />
-            <Detail label="Fecha de fallecimiento" value={viewRow?.fechaFallecimiento} />
+            <Detail
+              label="Estado físico del ingresado"
+              value={viewRow?.estadoFisico}
+            />
+            <Detail
+              label="Fecha de fallecimiento"
+              value={viewRow?.fechaFallecimiento}
+            />
             <Detail label="Causa" value={viewRow?.causaFallecimiento} />
 
-            <View style={{ alignItems: 'flex-end', marginTop: 12 }}>
+            <Text style={styles.section}>HISTORIAL DE ENFERMEDADES</Text>
+            {Array.isArray(viewRow?.enfermedadesHistorial) &&
+            viewRow.enfermedadesHistorial.length ? (
+              <Card>
+                <Card.Content style={{ paddingTop: 8 }}>
+                  {viewRow.enfermedadesHistorial.map((h, i) => (
+                    <View
+                      key={`${h.diagnostico}-${h.fecha}-${i}`}
+                      style={styles.histItem}
+                    >
+                      <Text>
+                        • {h.diagnostico} — {h.fecha}
+                      </Text>
+                    </View>
+                  ))}
+                </Card.Content>
+              </Card>
+            ) : (
+              <Text style={{ color: '#6B7C87' }}>Sin registros.</Text>
+            )}
+
+            <View
+              style={{
+                flexDirection: 'row',
+                justifyContent: 'flex-end',
+                gap: 8,
+                marginTop: 12,
+              }}
+            >
+              <Button
+                icon="file-download"
+                onPress={() => descargarPDFDesdeModal(viewRow)}
+              >
+                Guardar/Imprimir PDF
+              </Button>
               <Button onPress={() => setViewOpen(false)}>Cerrar</Button>
             </View>
           </ScrollView>
         </Modal>
       </Portal>
 
-      <Snackbar visible={snack.visible} onDismiss={() => setSnack({ visible: false, text: '' })} duration={2500}>
+      <Snackbar
+        visible={snack.visible}
+        onDismiss={() => setSnack({ visible: false, text: '' })}
+        duration={2500}
+      >
         {snack.text}
       </Snackbar>
     </View>
@@ -509,14 +816,14 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 10,
     paddingHorizontal: 12,
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#ffffffff',
   },
   mailItemActive: { backgroundColor: '#EEF2FF' },
   avatar: { backgroundColor: '#E2E8F0', marginRight: 12 },
   mailBody: { flex: 1 },
   mailHeader: { flexDirection: 'row', alignItems: 'center' },
   mailTitle: { flex: 1, fontWeight: '600', fontSize: 16, color: '#0F172A' },
-  mailDate: { marginLeft: 8, color: '#64748B', fontSize: 12 },
+  mailDate: { marginLeft: 8, color: '#005de0ff', fontSize: 12 },
   mailSubtitle: { marginTop: 2, flexDirection: 'row', alignItems: 'center' },
   mailActions: { flexDirection: 'row', marginLeft: 6 },
 
@@ -530,6 +837,14 @@ const styles = StyleSheet.create({
 
   // Detalle
   detailRow: { flexDirection: 'row', marginBottom: 6 },
-  detailLabel: { width: 200, color: '#6B7C87' },
+  detailLabel: { width: 200, color: '#0a5689ff' },
   detailValue: { flex: 1, fontWeight: '500' },
+
+  // Historial
+  histItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 6,
+  },
 });

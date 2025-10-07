@@ -454,7 +454,8 @@ export default function ProgramarMedicamento() {
       </Appbar.Header>
 
       <View style={styles.container}>
-        <Searchbar placeholder="Buscar por paciente/médico/medicamento…" value={q} onChangeText={setQ} style={{ marginBottom: 10 }} />
+        <Searchbar placeholder="Buscar por paciente/médico/medicamento…" value={q} onChangeText={setQ}           style={{ marginBottom: 10, backgroundColor: '#0483a04b', borderRadius: 16 }}
+          inputStyle={{ color: '#121212ff' }}/>
 
         <Card style={styles.card} mode="elevated">
           <Card.Content style={{ paddingTop: 0 }}>
@@ -505,7 +506,7 @@ export default function ProgramarMedicamento() {
         </Card>
       </View>
 
-      <Button style={styles.fab} icon="plus" mode="contained" onPress={openCreate}>Añadir</Button>
+      {/* <Button style={styles.fab} icon="plus" mode="contained" onPress={openCreate}>Añadir</Button> */}
 
       {/* Modal crear/editar */}
       <Portal>

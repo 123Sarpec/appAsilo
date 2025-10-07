@@ -19,13 +19,13 @@ export default function HomeTabs() {
       screenOptions={{
         headerShown: false,
         tabBarShowLabel: false,
-        tabBarActiveTintColor: '#1565C0',
-        tabBarInactiveTintColor: '#8FA3B0',
+        tabBarActiveTintColor: '#f8f9faff',
+        tabBarInactiveTintColor: '#01020aff',
         tabBarStyle: {
           height: 62,
           borderTopLeftRadius: 16,
           borderTopRightRadius: 16,
-          backgroundColor: '#FFFFFF',
+          backgroundColor: '#33b6eaff',
           position: 'absolute',
           overflow: 'hidden',
           elevation: 8,

@@ -199,12 +199,14 @@ export default function MedicamentoAgregar() {
   return (
     <View style={{ flex: 1 }}>
       <Appbar.Header mode="small" elevated>
-        <Appbar.Content title="Medicamentos" subtitle="Stock automático al inventario" />
+        <Appbar.Content title="Registros de Medicamentos" subtitle="Stock automático al inventario" />
         <Appbar.Action icon="plus" onPress={openCreate} />
       </Appbar.Header>
 
       <View style={styles.container}>
-        <Searchbar placeholder="Buscar por nombre, dosis o fecha…" value={q} onChangeText={setQ} style={{ marginBottom: 10 }} />
+        <Searchbar placeholder="Buscar por nombre, dosis o fecha…" value={q} onChangeText={setQ} 
+                 style={{ marginBottom: 10, backgroundColor: '#0483a04b', borderRadius: 16 }}
+          inputStyle={{ color: '#fafafaff' }}/>
 
         <Card style={styles.card} mode="elevated">
           <Card.Content style={{ paddingTop: 0 }}>

@@ -155,9 +155,9 @@ export default function Medicos() {
   const isBusy = loading || !authReady;
 
   return (
-    <View style={{ flex: 1 }}>
+    <View style={{ flex: 1, }}>
       <Appbar.Header mode="small" elevated>
-        <Appbar.Content title="Médicos" subtitle="Lista (Firestore)" />
+        <Appbar.Content title=" Registros Médicos" subtitle="Lista (Firestore)" />
         <Appbar.Action icon="plus" onPress={openCreate} />
       </Appbar.Header>
 
@@ -166,7 +166,9 @@ export default function Medicos() {
           placeholder="Buscar por nombre, CUI, teléfono..."
           value={query}
           onChangeText={setQuery}
-          style={styles.search}
+          // style={styles.search}
+          style={{ marginBottom: 10, backgroundColor: '#0483a04b', borderRadius: 16 }}
+          inputStyle={{ color: '#111010ff' }}
         />
 
         <Card style={styles.card} mode="elevated">
@@ -277,7 +279,7 @@ const styles = StyleSheet.create({
   card: { borderRadius: 16 },
   center: { alignItems: 'center', paddingVertical: 16 },
   itemTitle: { fontWeight: '600' },
-  itemDesc: { color: '#6B7C87' },
+  itemDesc: { color: '#01080dff' },
   avatar: { backgroundColor: '#1e88e5' },
   actions: { flexDirection: 'row', alignItems: 'center' },
   fab: { position: 'absolute', right: 16, bottom: 16 },

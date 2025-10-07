@@ -7,8 +7,6 @@ import { auth } from './firebase';
 
 import Logins from './vistas/Logins';
 import HomeTabs from './vistas/HomeTabs';
-import AppNavigator from './navigation/AppNavigator';
-
 
 const Stack = createNativeStackNavigator();
 
@@ -16,14 +14,13 @@ const theme = {
   ...MD3LightTheme,
   colors: {
     ...MD3LightTheme.colors,
-    primary: '#1565C0',    // azul profesional
-    secondary: '#00BFA5',  // acento
+    primary: '#1565C0',
+    secondary: '#00BFA5',
   },
 };
 
 export default function App() {
   return (
-    
     <PaperProvider theme={theme}>
       <NavigationContainer>
         <Stack.Navigator>
@@ -37,9 +34,19 @@ export default function App() {
             component={HomeTabs}
             options={({ navigation }) => ({
               title: 'App Asilo',
+              headerTitleAlign: 'center',          // centrado
+              headerStyle: {
+                backgroundColor: '#33b6ea',        // celeste como tab inferior
+              },
+              headerTintColor: '#fff',             // texto blanco
+              headerTitleStyle: {
+                fontWeight: 'bold',
+                fontSize: 20,
+              },
               headerRight: () => (
                 <IconButton
                   icon="logout"
+                  iconColor="#fff"                 // ícono blanco
                   onPress={async () => {
                     await signOut(auth);
                     navigation.replace('Login');
