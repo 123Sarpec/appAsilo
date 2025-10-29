@@ -1,260 +1,532 @@
-// vistas/MedicamentoAgregar.js
+// vistas/ProgramarMedicamento.js
 import React, { useEffect, useMemo, useState } from 'react';
-import { View, StyleSheet, Alert } from 'react-native';
+import { View, StyleSheet, ScrollView, Alert, Platform } from 'react-native';
 import {
-  Appbar, Card, Text, TextInput, Button, IconButton, Portal, Modal, FAB,
-  Snackbar, Divider, ActivityIndicator, Searchbar, TouchableRipple
+  Appbar, Card, Text, Searchbar, Button, IconButton, TextInput,
+  Portal, Modal, Snackbar, Divider, ActivityIndicator, RadioButton,
+  List, Chip
 } from 'react-native-paper';
 import { FlatList } from 'react-native';
-import Icon from 'react-native-vector-icons/MaterialCommunityIcons';
+import DateTimePicker from '@react-native-community/datetimepicker';
 
 // Firebase
 import { db, auth } from '../firebase';
 import {
-  collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot,
-  query as fsQuery, orderBy, serverTimestamp, increment, setDoc, getDoc
+  collection, onSnapshot, orderBy, query as fsQuery, addDoc, updateDoc,
+  deleteDoc, doc, serverTimestamp, runTransaction
 } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 
-// Helpers
+// Notifee
+import notifee, {
+  AndroidImportance,
+  RepeatFrequency,
+  TriggerType,
+  AuthorizationStatus,
+  AndroidNotificationSetting,
+} from '@notifee/react-native';
+
+/* ========= Helpers ========= */
+const pad = (n) => String(n).padStart(2, '0');
+const fmtDateTime = (v) => {
+  try {
+    const d = v?.toDate ? v.toDate() : new Date(v);
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch { return '—'; }
+};
+const toISODateTimeLocal = (d = new Date()) =>
+  new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+const fmtHM = (d) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
+const parseISOToDate = (val) => new Date(val);
+const hmToDateNext = (hhmm) => {
+  const [h, m] = (hhmm || '00:00').split(':').map(Number);
+  const now = new Date();
+  const d = new Date(now);
+  d.setSeconds(0, 0);
+  d.setHours(h || 0, m || 0, 0, 0);
+  if (d <= now) d.setDate(d.getDate() + 1);
+  return d;
+};
+const nextWeekdayAt = (weekday, hhmm) => {
+  const [h, m] = (hhmm || '00:00').split(':').map(Number);
+  const now = new Date();
+  const result = new Date(now);
+  result.setSeconds(0, 0);
+  result.setHours(h || 0, m || 0, 0, 0);
+  const delta = ((weekday - result.getDay()) + 7) % 7;
+  if (delta === 0 && result <= now) result.setDate(result.getDate() + 7);
+  else result.setDate(result.getDate() + delta);
+  return result;
+};
 const slug = (s = '') =>
-  s.toString().trim().toLowerCase()
+  s.toLowerCase().trim()
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/(^-|-$)/g, '');
 
-const fmtDate = (ts) => {
-  try {
-    if (!ts) return '';
-    const d = ts.toDate ? ts.toDate() : new Date(ts);
-    return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
-      .toISOString().slice(0, 10);
-  } catch { return ''; }
+const C = {
+  medicos: 'medicos',
+  pacientes: 'pacientes',
+  medicamentos: 'medicamentos',
+  programaciones: 'programaciones',
+  inventarios: 'inventarios',
 };
 
-export default function MedicamentoAgregar() {
-  // State
-  const [items, setItems] = useState([]);
+/* ========= Notificaciones ========= */
+async function ensureHeadsUpChannel() {
+  // 1) estado actual
+  const settings = await notifee.getNotificationSettings();
+
+  // 2) permiso de notificaciones (Android 13+)
+  if (settings.authorizationStatus === AuthorizationStatus.DENIED) {
+    const res = await notifee.requestPermission();
+    if (res.authorizationStatus !== AuthorizationStatus.AUTHORIZED) {
+      await notifee.openNotificationSettings();
+      throw new Error('Activa las notificaciones para AppAsilo.');
+    }
+  }
+
+  // 3) permiso de "Alarmas exactas" (algunos equipos lo exigen)
+  if (settings.android?.alarm === AndroidNotificationSetting.DISABLED) {
+    await notifee.openAlarmPermissionSettings();
+    throw new Error('Activa "Alarmas exactas" para AppAsilo.');
+  }
+
+  // 4) canal heads-up
+  await notifee.createChannel({
+    id: 'meds',
+    name: 'Recordatorios de medicamentos',
+    importance: AndroidImportance.HIGH,
+    sound: 'default',
+    vibration: true,
+    lights: true,
+    badge: true,
+  });
+}
+
+const schedulePairOnce = async ({ title, body, when, payload }) => {
+  await ensureHeadsUpChannel();
+  const ids = [];
+  const pre = new Date(when.getTime() - 60 * 1000);
+  if (pre > new Date()) {
+    const preId = await notifee.createTriggerNotification(
+      {
+        title: `En 1 min: ${title}`,
+        body,
+        android: { channelId: 'meds', pressAction: { id: 'default' }, smallIcon: 'ic_launcher', color: '#1565C0' },
+        data: payload || {},
+      },
+      { type: TriggerType.TIMESTAMP, timestamp: pre.getTime(), alarmManager: true }
+    );
+    ids.push(preId);
+  }
+
+  const id = await notifee.createTriggerNotification(
+    {
+      title,
+      body,
+      android: { channelId: 'meds', pressAction: { id: 'default' }, smallIcon: 'ic_launcher', color: '#1565C0' },
+      data: payload || {},
+    },
+    { type: TriggerType.TIMESTAMP, timestamp: when.getTime(), alarmManager: true }
+  );
+  ids.push(id);
+  return ids;
+};
+
+async function scheduleCadaXHours({ title, body, start, horas = 8, diasHorizonte = 30, payload }) {
+  const ids = [];
+  const ms = Math.max(1, Number(horas || 8)) * 60 * 60 * 1000;
+  const horizon = Number(diasHorizonte || 30) * 24 * 60 * 60 * 1000;
+
+  let t = new Date(start);
+  if (t < new Date()) {
+    const diff = new Date() - t;
+    const steps = Math.floor(diff / ms) + 1;
+    t = new Date(t.getTime() + steps * ms);
+  }
+
+  const end = new Date(t.getTime() + horizon);
+  while (t <= end) {
+    const pairIds = await schedulePairOnce({ title, body, when: t, payload });
+    ids.push(...pairIds);
+    t = new Date(t.getTime() + ms);
+  }
+  return ids;
+}
+
+const programarNotifs = async (data) => {
+  const { medicoNombre, pacienteNombre, medicamentoNombre, tipo, cantidadPorToma, inicio, diasSemana, horaSemanal, times, intervaloHoras } = data;
+  const baseTitle = `Tomar: ${medicamentoNombre}`;
+  const baseBody = `Paciente: ${pacienteNombre} · Asignó: Dr(a). ${medicoNombre} · Cant.: ${cantidadPorToma}`;
+  const payload = { medicamentoNombre, cantidadPorToma: String(cantidadPorToma || 0) };
+
+  const ids = [];
+
+  if (tipo === 'unico') {
+    const when = parseISOToDate(inicio);
+    ids.push(...await schedulePairOnce({ title: baseTitle, body: baseBody, when, payload }));
+    return ids;
+  }
+
+  if (tipo === 'cadax') {
+    const start = parseISOToDate(inicio);
+    const extra = await scheduleCadaXHours({
+      title: baseTitle,
+      body: baseBody,
+      start,
+      horas: Number(intervaloHoras || 8),
+      diasHorizonte: 30,
+      payload,
+    });
+    ids.push(...extra);
+    return ids;
+  }
+
+  if (tipo === 'semanal') {
+    for (const d of diasSemana || []) {
+      const first = nextWeekdayAt(Number(d), horaSemanal);
+      ids.push(...await schedulePairOnce({ title: baseTitle, body: baseBody, when: first, payload }));
+      const id = await notifee.createTriggerNotification(
+        { title: baseTitle, body: baseBody, android: { channelId: 'meds', pressAction: { id: 'default' } }, data: payload },
+        { type: TriggerType.TIMESTAMP, timestamp: first.getTime(), repeatFrequency: RepeatFrequency.WEEKLY, alarmManager: true }
+      );
+      ids.push(id);
+    }
+    return ids;
+  }
+
+  if (tipo === 'postcomida') {
+    const t = times || {};
+    const entries = Object.entries(t).filter(([, v]) => !!v);
+    for (const [label, hhmm] of entries) {
+      const first = hmToDateNext(hhmm);
+      ids.push(...await schedulePairOnce({ title: `${baseTitle} (${label})`, body: baseBody, when: first, payload }));
+      const id = await notifee.createTriggerNotification(
+        { title: `${baseTitle} (${label})`, body: baseBody, android: { channelId: 'meds', pressAction: { id: 'default' } }, data: payload },
+        { type: TriggerType.TIMESTAMP, timestamp: first.getTime(), repeatFrequency: RepeatFrequency.DAILY, alarmManager: true }
+      );
+      ids.push(id);
+    }
+    return ids;
+  }
+
+  return ids;
+};
+
+const cancelarNotifs = async (notifIds = []) => {
+  try { await notifee.cancelTriggerNotifications(notifIds); }
+  catch (e) { console.log('cancel notifee error', e); }
+};
+
+/* ========= Inventario (Transacción) ========= */
+async function descontarInventarioTx(inventarioId, cantidad) {
+  if (!inventarioId || !cantidad) return;
+  const ref = doc(db, C.inventarios, inventarioId);
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists()) throw new Error('Inventario no encontrado');
+    const data = snap.data();
+    const stock = Number(data.stock || 0);
+    const qty = Number(cantidad);
+    if (!Number.isFinite(qty) || qty <= 0) throw new Error('Cantidad inválida');
+
+    if (stock < qty) throw new Error(`Stock insuficiente (${stock} disponibles)`);
+
+    tx.update(ref, {
+      stock: stock - qty,
+      consumido: Number(data.consumido || 0) + qty,
+      updatedAt: serverTimestamp(),
+    });
+  });
+}
+
+/* ========= Pantalla ========= */
+export default function ProgramarMedicamento() {
   const [loading, setLoading] = useState(true);
+  const [medicos, setMedicos] = useState([]);
+  const [pacientes, setPacientes] = useState([]);
+  const [medicamentos, setMedicamentos] = useState([]);
+  const [items, setItems] = useState([]);
+
   const [q, setQ] = useState('');
 
   const [visible, setVisible] = useState(false);
-  const [mode, setMode] = useState('create'); // create | edit
-  const [current, setCurrent] = useState(null);
+  const [mode, setMode] = useState('create');
+  const [currentId, setCurrentId] = useState(null);
+
+  const [viewOpen, setViewOpen] = useState(false);
+  const [viewRow, setViewRow] = useState(null);
 
   const [snack, setSnack] = useState({ visible: false, text: '' });
+
   const [form, setForm] = useState({
-    nombre: '',
-    dosis: '',
-    fechaIngreso: '',
-    cantidad: '',
+    medicoId: '', medicoNombre: '',
+    pacienteId: '', pacienteNombre: '',
+    medicamentoId: '', medicamentoNombre: '',
+    inventarioId: '',
+    cantidadPorToma: '',
+    tipo: 'unico',            // unico | cadax | semanal | postcomida
+    intervaloHoras: '8',      // solo para "cadax"
+    inicio: toISODateTimeLocal(new Date()),
+    diasSemana: [],
+    horaSemanal: '08:00',
+    times: { desayuno: '08:00', almuerzo: '13:00', cena: '19:00' },
+    notas: '',
+    notifIds: [],
+    activo: true,
+    estado: 'programado',
   });
-
-  // Auth + snapshot
-  useEffect(() => {
-    let unsub;
-    const unsubAuth = onAuthStateChanged(auth, (u) => {
-      if (!u) { setLoading(false); return; }
-
-      const qMed = fsQuery(collection(db, 'medicamentos'), orderBy('createdAt', 'desc'));
-      unsub = onSnapshot(
-        qMed,
-        (snap) => {
-          setItems(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
-          setLoading(false);
-        },
-        (err) => {
-          console.log('onSnapshot medicamentos error:', err);
-          setLoading(false);
-          setSnack({ visible: true, text: err.code || 'Error' });
-        }
-      );
-    });
-
-    return () => { unsubAuth && unsubAuth(); unsub && unsub(); };
-  }, []);
-
-  // Helpers
   const onChange = (k, v) => setForm((s) => ({ ...s, [k]: v }));
   const showSnack = (t) => setSnack({ visible: true, text: t });
 
+  // === Pickers state ===
+  const [showInicioDate, setShowInicioDate] = useState(false);
+  const [showInicioTime, setShowInicioTime] = useState(false);
+  const [tmpInicioBase, setTmpInicioBase] = useState(new Date());
+
+  const [showSemTime, setShowSemTime] = useState(false);
+  const [showDesayuno, setShowDesayuno] = useState(false);
+  const [showAlmuerzo, setShowAlmuerzo] = useState(false);
+  const [showCena, setShowCena] = useState(false);
+
+  const openInicioPicker = () => {
+    const base = form.inicio ? new Date(form.inicio) : new Date();
+    setTmpInicioBase(base);
+    setShowInicioDate(true);
+  };
+
+  // Carga de datos
+  useEffect(() => {
+    let u1, u2, u3, u4;
+    const stop = onAuthStateChanged(auth, (u) => {
+      if (!u) { setLoading(false); return; }
+      u1 = onSnapshot(fsQuery(collection(db, C.medicos), orderBy('nombre')), s => setMedicos(s.docs.map(d => ({ id: d.id, ...d.data() }))));
+      u2 = onSnapshot(fsQuery(collection(db, C.pacientes), orderBy('nombreCompleto')), s => setPacientes(s.docs.map(d => ({ id: d.id, ...d.data() }))));
+      u3 = onSnapshot(fsQuery(collection(db, C.medicamentos), orderBy('nombre')), s => setMedicamentos(s.docs.map(d => ({ id: d.id, ...d.data() }))));
+      u4 = onSnapshot(fsQuery(collection(db, C.programaciones), orderBy('createdAt', 'desc')), s => { setItems(s.docs.map(d => ({ id: d.id, ...d.data() }))); setLoading(false); });
+    });
+    return () => { stop && stop(); u1&&u1(); u2&&u2(); u3&&u3(); u4&&u4(); };
+  }, []);
+
+  // Autocerrar “único” vencido
+  useEffect(() => {
+    const now = new Date();
+    items
+      .filter(x => x.tipo === 'unico' && x.activo && x.inicio && new Date(x.inicio) <= now)
+      .forEach(async (row) => {
+        try { await updateDoc(doc(db, C.programaciones, row.id), { activo: false, estado: 'finalizado', updatedAt: serverTimestamp() }); }
+        catch {}
+      });
+  }, [items]);
+
+  /* CRUD */
   const openCreate = () => {
-    setMode('create');
-    setCurrent(null);
-    setForm({
-      nombre: '',
-      dosis: '',
-      fechaIngreso: new Date().toISOString().split('T')[0],
-      cantidad: '',
-    });
+    setMode('create'); setCurrentId(null);
+    setForm(s => ({
+      ...s,
+      medicoId: '', medicoNombre: '',
+      pacienteId: '', pacienteNombre: '',
+      medicamentoId: '', medicamentoNombre: '',
+      inventarioId: '',
+      cantidadPorToma: '',
+      tipo: 'unico',
+      intervaloHoras: '8',
+      inicio: toISODateTimeLocal(new Date()),
+      diasSemana: [],
+      horaSemanal: '08:00',
+      times: { desayuno: '08:00', almuerzo: '13:00', cena: '19:00' },
+      notas: '', notifIds: [], activo: true, estado: 'programado',
+    }));
     setVisible(true);
   };
-
   const openEdit = (row) => {
-    setMode('edit');
-    setCurrent(row);
+    setMode('edit'); setCurrentId(row.id);
     setForm({
-      nombre: row.nombre ?? '',
-      dosis: row.dosis ?? '',
-      fechaIngreso: row.fechaIngreso || fmtDate(row.createdAt) || '',
-      cantidad: String(row.cantidad ?? ''),
+      medicoId: row.medicoId, medicoNombre: row.medicoNombre,
+      pacienteId: row.pacienteId, pacienteNombre: row.pacienteNombre,
+      medicamentoId: row.medicamentoId, medicamentoNombre: row.medicamentoNombre,
+      inventarioId: row.inventarioId || slug(row.medicamentoNombre),
+      cantidadPorToma: String(row.cantidadPorToma ?? ''),
+      tipo: row.tipo,
+      intervaloHoras: String(row.intervaloHoras || '8'),
+      inicio: row.inicio || toISODateTimeLocal(new Date()),
+      diasSemana: row.diasSemana || [],
+      horaSemanal: row.horaSemanal ?? '08:00',
+      times: row.times || { desayuno: '', almuerzo: '', cena: '' },
+      notas: row.notas ?? '',
+      notifIds: row.notifIds ?? [],
+      activo: !!row.activo,
+      estado: row.estado || (row.activo ? 'programado' : 'pausado'),
     });
     setVisible(true);
   };
+  const openView = (row) => { setViewRow(row); setViewOpen(true); };
 
-  // Inventario: aplicar delta a inventarios/{slug(nombre)}
-  const applyInventoryDelta = async (nombre, delta) => {
-    if (!nombre || !delta || isNaN(delta)) return;
-    const invId = slug(nombre);
-    const ref = doc(db, 'inventarios', invId);
-    const now = serverTimestamp();
-
-    const snap = await getDoc(ref);
-    if (!snap.exists()) {
-      await setDoc(ref, { nombre, stock: delta, createdAt: now, updatedAt: now });
-    } else {
-      await updateDoc(ref, { stock: increment(delta), updatedAt: now });
-    }
-  };
-
-  // Validación
   const validate = () => {
-    if (!form.nombre.trim()) return 'El nombre del medicamento es obligatorio.';
-    if (!form.fechaIngreso) return 'La fecha de ingreso es obligatoria.';
-    const cant = Number(form.cantidad);
-    if (!Number.isFinite(cant) || cant <= 0) return 'Cantidad inválida.';
+    if (!form.medicoId) return 'Seleccione un médico.';
+    if (!form.pacienteId) return 'Seleccione un paciente.';
+    if (!form.medicamentoId) return 'Seleccione un medicamento.';
+    if (!form.inventarioId) onChange('inventarioId', slug(form.medicamentoNombre));
+    if (!form.cantidadPorToma || !/^\d+(\.\d+)?$/.test(String(form.cantidadPorToma))) return 'Indique la cantidad por toma (número).';
+
+    if (form.tipo === 'unico' || form.tipo === 'cadax') {
+      if (!form.inicio) return 'Defina fecha y hora de inicio.';
+      if (form.tipo === 'cadax') {
+        const h = Number(form.intervaloHoras);
+        if (!Number.isFinite(h) || h <= 0) return 'Intervalo (horas) inválido.';
+      }
+    }
+    if (form.tipo === 'semanal') {
+      if (!form.diasSemana?.length) return 'Seleccione al menos un día.';
+      if (!form.horaSemanal) return 'Defina la hora.';
+    }
+    if (form.tipo === 'postcomida') {
+      const t = form.times || {}; if (!t.desayuno && !t.almuerzo && !t.cena) return 'Selecciona al menos un horario.';
+    }
     return null;
   };
 
-  // Guardar / Actualizar
   const save = async () => {
-    const err = validate();
-    if (err) return showSnack(err);
-
-    const base = {
-      nombre: form.nombre.trim(),
-      dosis: form.dosis.trim(),
-      fechaIngreso: String(form.fechaIngreso),
-      cantidad: Number(form.cantidad),
-    };
-
+    const err = validate(); if (err) return showSnack(err);
     try {
+      if (mode === 'edit' && form.notifIds?.length) await cancelarNotifs(form.notifIds);
+
+      const notifIds = await programarNotifs({
+        medicoNombre: form.medicoNombre,
+        pacienteNombre: form.pacienteNombre,
+        medicamentoNombre: form.medicamentoNombre,
+        cantidadPorToma: Number(form.cantidadPorToma),
+        tipo: form.tipo,
+        inicio: form.inicio,
+        diasSemana: form.diasSemana,
+        horaSemanal: form.horaSemanal,
+        times: form.times,
+        intervaloHoras: Number(form.intervaloHoras || 8),
+      });
+
+      const payload = {
+        ...form,
+        cantidadPorToma: Number(form.cantidadPorToma),
+        intervaloHoras: Number(form.intervaloHoras || 8),
+        notifIds,
+        updatedAt: serverTimestamp(),
+      };
+      if (mode === 'create') payload.createdAt = serverTimestamp();
+
       if (mode === 'create') {
-        await addDoc(collection(db, 'medicamentos'), { ...base, createdAt: serverTimestamp() });
-        await applyInventoryDelta(base.nombre, base.cantidad);
-        showSnack('Medicamento agregado y stock actualizado.');
+        await descontarInventarioTx(form.inventarioId || slug(form.medicamentoNombre), Number(form.cantidadPorToma));
+      }
+
+      if (mode === 'create') {
+        await addDoc(collection(db, C.programaciones), payload);
+        showSnack('Programación creada.');
       } else {
-        const prevNombre = current?.nombre ?? base.nombre;
-        const prevCant = Number(current?.cantidad ?? 0);
-        const newCant = base.cantidad;
-
-        if (base.nombre === prevNombre) {
-          const delta = newCant - prevCant;
-          if (delta) await applyInventoryDelta(base.nombre, delta);
-        } else {
-          if (prevCant) await applyInventoryDelta(prevNombre, -prevCant);
-          if (newCant) await applyInventoryDelta(base.nombre, newCant);
-        }
-
-        await updateDoc(doc(db, 'medicamentos', current.id), { ...base, updatedAt: serverTimestamp() });
-        showSnack('Medicamento actualizado y stock ajustado.');
+        await updateDoc(doc(db, C.programaciones, currentId), payload);
+        showSnack('Programación actualizada.');
       }
       setVisible(false);
     } catch (e) {
-      console.log('save medicamento error:', e);
-      showSnack(`Error al guardar: ${e.code || e.message}`);
+      console.log('save programacion error:', e);
+      showSnack(e.message || 'Error al guardar.');
     }
   };
 
-  // Eliminar
   const remove = (row) => {
-    Alert.alert('Eliminar', `¿Borrar “${row.nombre}”?`, [
+    Alert.alert('Eliminar', `¿Borrar programación de “${row.pacienteNombre} / ${row.medicamentoNombre}”?`, [
       { text: 'Cancelar', style: 'cancel' },
       {
         text: 'Eliminar',
         style: 'destructive',
         onPress: async () => {
           try {
-            await deleteDoc(doc(db, 'medicamentos', row.id));
-            await applyInventoryDelta(row.nombre, -Number(row.cantidad || 0));
-            showSnack('Medicamento eliminado y stock ajustado.');
-          } catch (e) {
-            console.log('delete medicamento error:', e);
-            showSnack(`No se pudo eliminar: ${e.code || e.message}`);
-          }
+            await cancelarNotifs(row.notifIds || []);
+            await deleteDoc(doc(db, C.programaciones, row.id));
+            showSnack('Programación eliminada.');
+          } catch { showSnack('No se pudo eliminar.'); }
         },
       },
     ]);
   };
 
-  // Filtro y UI
+  const pause = async (row) => {
+    try {
+      await cancelarNotifs(row.notifIds || []);
+      await updateDoc(doc(db, C.programaciones, row.id), { activo: false, estado: 'pausado', updatedAt: serverTimestamp() });
+      showSnack('Programación pausada.');
+    } catch { showSnack('No se pudo pausar.'); }
+  };
+  const resume = async (row) => {
+    try {
+      const ids = await programarNotifs(row);
+      await updateDoc(doc(db, C.programaciones, row.id), { activo: true, estado: 'programado', notifIds: ids, updatedAt: serverTimestamp() });
+      showSnack('Programación reanudada.');
+    } catch { showSnack('No se pudo reanudar.'); }
+  };
+
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return items;
-    return items.filter((x) => [x.nombre, x.dosis, x.fechaIngreso].join(' ').toLowerCase().includes(s));
+    return items.filter(x =>
+      [x.pacienteNombre, x.medicoNombre, x.medicamentoNombre, x.tipo, String(x.cantidadPorToma || ''), fmtDateTime(x.createdAt)]
+        .join(' ').toLowerCase().includes(s)
+    );
   }, [items, q]);
-
-  const Separator = () => <Divider />;
 
   return (
     <View style={{ flex: 1 }}>
       <Appbar.Header mode="small" elevated>
-        <Appbar.Content title="Registros de Medicamentos" subtitle="Stock automático al inventario" />
+        <Appbar.Content title="Programar Medicamento" subtitle="Notifica según pauta · Desc. solo al inicio" />
         <Appbar.Action icon="plus" onPress={openCreate} />
       </Appbar.Header>
 
       <View style={styles.container}>
-        <Searchbar placeholder="Buscar por nombre, dosis o fecha…" value={q} onChangeText={setQ} 
-                 style={{ marginBottom: 10, backgroundColor: '#0483a04b', borderRadius: 16 }}
-          inputStyle={{ color: '#fafafaff' }}/>
+        <Searchbar placeholder="Buscar por paciente/médico/medicamento…" value={q} onChangeText={setQ}
+          style={{ marginBottom: 10, backgroundColor: '#0483a04b', borderRadius: 16 }}
+          inputStyle={{ color: '#121212ff' }}/>
 
         <Card style={styles.card} mode="elevated">
           <Card.Content style={{ paddingTop: 0 }}>
             {loading ? (
               <View style={styles.center}>
                 <ActivityIndicator />
-                <Text style={{ marginTop: 8, color: '#6B7C87' }}>Cargando…</Text>
+                <Text style={{ marginTop: 6, color: '#6B7C87' }}>Cargando…</Text>
               </View>
             ) : (
               <View style={{ height: 520 }}>
                 <FlatList
                   data={filtered}
                   keyExtractor={(it) => it.id}
-                  ItemSeparatorComponent={Separator}
-                  ListEmptyComponent={
-                    <View style={{ paddingVertical: 16 }}>
-                      <Text style={{ color: '#6B7C87' }}>Sin resultados</Text>
-                    </View>
-                  }
-                  renderItem={({ item: row, index }) => (
-                    <View key={row.id}>
-                      <TouchableRipple rippleColor="rgba(0,0,0,0.08)" onLongPress={() => openEdit(row)}>
-                        <View style={styles.itemRow}>
-                          {/* Ícono en vez de inicial */}
-                          <View style={{ marginRight: 12 }}>
-                            <Icon name="pill" size={28} color="#1565C0" />
-                          </View>
-
-                          <View style={styles.itemBody}>
-                            <View style={styles.itemHeader}>
-                              <Text numberOfLines={1} style={styles.itemTitle}>{row.nombre}</Text>
-                              <Text style={styles.itemDate}>{row.fechaIngreso || fmtDate(row.createdAt)}</Text>
-                            </View>
-                            <Text style={styles.itemSub}>Dosis: {row.dosis || '—'}</Text>
-                          </View>
-
-                          <View style={styles.qtyPill}>
-                            <Text style={{ fontWeight: '700' }}>{row.cantidad ?? 0}</Text>
-                          </View>
-
-                          <View style={{ flexDirection: 'row' }}>
-                            <IconButton icon="pencil" onPress={() => openEdit(row)} />
-                            <IconButton icon="delete" onPress={() => remove(row)} />
-                          </View>
+                  ItemSeparatorComponent={() => <Divider />}
+                  ListEmptyComponent={<Text style={{ color: '#6B7C87', paddingVertical: 12 }}>Sin programaciones</Text>}
+                  renderItem={({ item: row }) => (
+                    <List.Item
+                      title={`${row.pacienteNombre} · ${row.medicamentoNombre}`}
+                      description={() => (
+                        <View>
+                          <Text style={{ color: '#6B7C87' }}>Médico: {row.medicoNombre}</Text>
+                          <Text style={{ color: '#6B7C87' }}>
+                            Tipo: {row.tipo}{row.tipo === 'cadax' ? ` (${row.intervaloHoras}h)` : ''} · Cant.: {row.cantidadPorToma} · Inicio: {row.inicio ? row.inicio.replace('T', ' ') : '—'}
+                          </Text>
+                          <Text style={{ color: '#6B7C87' }}>
+                            Estado: {row.estado || (row.activo ? 'programado' : 'pausado')}
+                          </Text>
                         </View>
-                      </TouchableRipple>
-                      {index < filtered.length - 1 && <Divider />}
-                    </View>
+                      )}
+                      onPress={() => openView(row)}
+                      right={() => (
+                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                          {row.activo ? (
+                            <IconButton icon="pause-circle" onPress={() => pause(row)} />
+                          ) : (
+                            <IconButton icon="play-circle" onPress={() => resume(row)} />
+                          )}
+                          <IconButton icon="pencil" onPress={() => openEdit(row)} />
+                          <IconButton icon="delete" onPress={() => remove(row)} />
+                        </View>
+                      )}
+                    />
                   )}
                 />
               </View>
@@ -263,23 +535,227 @@ export default function MedicamentoAgregar() {
         </Card>
       </View>
 
-      <FAB style={styles.fab} icon="plus" onPress={openCreate} />
-
       {/* Modal crear/editar */}
       <Portal>
-        <Modal visible={visible} onDismiss={() => setVisible(false)} contentContainerStyle={styles.modal}>
-          <Text variant="titleMedium" style={{ marginBottom: 12 }}>
-            {mode === 'create' ? 'Agregar medicamento' : 'Editar medicamento'}
-          </Text>
+        <Modal visible={visible} onDismiss={() => setVisible(false)} dismissable contentContainerStyle={styles.modal}>
+          <ScrollView keyboardShouldPersistTaps="handled">
+            <Text variant="titleMedium" style={{ marginBottom: 8 }}>
+              {mode === 'create' ? 'Nueva programación' : 'Editar programación'}
+            </Text>
 
-          <TextInput label="Nombre del medicamento *" value={form.nombre} onChangeText={(v) => onChange('nombre', v)} style={styles.input} />
-          <TextInput label="Dosis (ej. 500mg)" value={form.dosis} onChangeText={(v) => onChange('dosis', v)} style={styles.input} />
-          <TextInput label="Fecha de ingreso * (YYYY-MM-DD)" value={form.fechaIngreso} onChangeText={(v) => onChange('fechaIngreso', v)} style={styles.input} />
-          <TextInput label="Cantidad *" value={form.cantidad} onChangeText={(v) => onChange('cantidad', v)} keyboardType="numeric" style={styles.input} />
+            <AutoSelect label="Médico *" value={form.medicoNombre}
+              onClear={() => onChange('medicoId','') || onChange('medicoNombre','')}
+              data={medicos} getLabel={(x) => x.nombre}
+              onSelect={(x) => onChange('medicoId', x.id) || onChange('medicoNombre', x.nombre)} />
 
-          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
-            <Button onPress={() => setVisible(false)}>Cancelar</Button>
-            <Button mode="contained" onPress={save}>{mode === 'create' ? 'Guardar' : 'Actualizar'}</Button>
+            <AutoSelect label="Paciente *" value={form.pacienteNombre}
+              onClear={() => onChange('pacienteId','') || onChange('pacienteNombre','')}
+              data={pacientes} getLabel={(x) => x.nombreCompleto}
+              onSelect={(x) => onChange('pacienteId', x.id) || onChange('pacienteNombre', x.nombreCompleto)} />
+
+            <AutoSelect label="Medicamento *" value={form.medicamentoNombre}
+              onClear={() => onChange('medicamentoId','') || onChange('medicamentoNombre','') || onChange('inventarioId','')}
+              data={medicamentos} getLabel={(x) => x.nombre}
+              onSelect={(x) => {
+                onChange('medicamentoId', x.id);
+                onChange('medicamentoNombre', x.nombre);
+                onChange('inventarioId', slug(x.nombre));
+              }} />
+
+            <TextInput
+              style={styles.input}
+              label="Cantidad por toma *"
+              value={String(form.cantidadPorToma)}
+              onChangeText={(v) => onChange('cantidadPorToma', v.replace(',', '.'))}
+              keyboardType="numeric"
+            />
+
+            <Text style={styles.section}>Tipo de programación</Text>
+            <RadioRow value={form.tipo} onChange={(v) => onChange('tipo', v)} />
+
+            {(form.tipo === 'unico' || form.tipo === 'cadax') && (
+              <>
+                {/* INICIO -> abre DatePicker y luego TimePicker */}
+                <TextInput
+                  label="Inicio * (fecha y hora)"
+                  value={form.inicio.replace('T',' ')}
+                  editable={false}
+                  onPressIn={openInicioPicker}
+                  right={<TextInput.Icon icon="calendar" onPress={openInicioPicker} />}
+                  style={styles.input}
+                />
+
+                {showInicioDate && (
+                  <DateTimePicker
+                    value={form.inicio ? new Date(form.inicio) : new Date()}
+                    mode="date"
+                    display={Platform.OS === 'ios' ? 'inline' : 'default'}
+                    onChange={(e, d) => {
+                      setShowInicioDate(false);
+                      if (d) {
+                        const base = new Date(d);
+                        const current = form.inicio ? new Date(form.inicio) : new Date();
+                        base.setHours(current.getHours(), current.getMinutes(), 0, 0);
+                        setTmpInicioBase(base);
+                        setShowInicioTime(true);
+                      }
+                    }}
+                  />
+                )}
+                {showInicioTime && (
+                  <DateTimePicker
+                    value={tmpInicioBase}
+                    mode="time"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={(e, d) => {
+                      setShowInicioTime(false);
+                      if (d) {
+                        const final = new Date(tmpInicioBase);
+                        final.setHours(d.getHours(), d.getMinutes(), 0, 0);
+                        onChange('inicio', toISODateTimeLocal(final));
+                      }
+                    }}
+                  />
+                )}
+
+                {form.tipo === 'cadax' && (
+                  <TextInput
+                    label="Cada X horas *"
+                    value={String(form.intervaloHoras)}
+                    onChangeText={(v) => onChange('intervaloHoras', v.replace(',', '.'))}
+                    keyboardType="numeric"
+                    style={styles.input}
+                  />
+                )}
+              </>
+            )}
+
+            {form.tipo === 'semanal' && (
+              <View style={{ gap: 8 }}>
+                <Text style={{ color: '#6B7C87' }}>Días de la semana</Text>
+                <WeekdayChips selected={form.diasSemana} onToggle={(arr) => onChange('diasSemana', arr)} />
+                <TextInput
+                  label="Hora (HH:mm)"
+                  value={form.horaSemanal}
+                  editable={false}
+                  right={<TextInput.Icon icon="clock-outline" onPress={() => setShowSemTime(true)} />}
+                  onPressIn={() => setShowSemTime(true)}
+                  style={styles.input}
+                />
+                {showSemTime && (
+                  <DateTimePicker
+                    value={hmToDateNext(form.horaSemanal)}
+                    mode="time"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={(e, d) => {
+                      setShowSemTime(false);
+                      if (d) onChange('horaSemanal', fmtHM(d));
+                    }}
+                  />
+                )}
+              </View>
+            )}
+
+            {form.tipo === 'postcomida' && (
+              <View style={{ gap: 8 }}>
+                <Text style={{ color: '#6B7C87' }}>Horarios (deja vacío para omitir)</Text>
+
+                <TextInput
+                  label="Desayuno (HH:mm)"
+                  value={form.times.desayuno || ''}
+                  editable={false}
+                  right={<TextInput.Icon icon="clock-outline" onPress={() => setShowDesayuno(true)} />}
+                  onPressIn={() => setShowDesayuno(true)}
+                  style={styles.input}
+                />
+                {showDesayuno && (
+                  <DateTimePicker
+                    value={hmToDateNext(form.times.desayuno || '08:00')}
+                    mode="time"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={(e, d) => {
+                      setShowDesayuno(false);
+                      if (d) onChange('times', { ...form.times, desayuno: fmtHM(d) });
+                    }}
+                  />
+                )}
+
+                <TextInput
+                  label="Almuerzo (HH:mm)"
+                  value={form.times.almuerzo || ''}
+                  editable={false}
+                  right={<TextInput.Icon icon="clock-outline" onPress={() => setShowAlmuerzo(true)} />}
+                  onPressIn={() => setShowAlmuerzo(true)}
+                  style={styles.input}
+                />
+                {showAlmuerzo && (
+                  <DateTimePicker
+                    value={hmToDateNext(form.times.almuerzo || '13:00')}
+                    mode="time"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={(e, d) => {
+                      setShowAlmuerzo(false);
+                      if (d) onChange('times', { ...form.times, almuerzo: fmtHM(d) });
+                    }}
+                  />
+                )}
+
+                <TextInput
+                  label="Cena (HH:mm)"
+                  value={form.times.cena || ''}
+                  editable={false}
+                  right={<TextInput.Icon icon="clock-outline" onPress={() => setShowCena(true)} />}
+                  onPressIn={() => setShowCena(true)}
+                  style={styles.input}
+                />
+                {showCena && (
+                  <DateTimePicker
+                    value={hmToDateNext(form.times.cena || '19:00')}
+                    mode="time"
+                    display={Platform.OS === 'ios' ? 'spinner' : 'default'}
+                    onChange={(e, d) => {
+                      setShowCena(false);
+                      if (d) onChange('times', { ...form.times, cena: fmtHM(d) });
+                    }}
+                  />
+                )}
+              </View>
+            )}
+
+            <TextInput label="Notas (opcional)" value={form.notas} onChangeText={(v) => onChange('notas', v)} style={styles.input} multiline />
+
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 }}>
+              <Text style={{ color: '#6B7C87' }}>Inventario (ID):</Text>
+              <Text style={{ fontFamily: 'monospace' }}>{form.inventarioId || '—'}</Text>
+            </View>
+
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', gap: 8 }}>
+              <Button onPress={() => setVisible(false)}>Cancelar</Button>
+              <Button mode="contained" onPress={save}>{mode === 'create' ? 'Guardar' : 'Actualizar'}</Button>
+            </View>
+          </ScrollView>
+        </Modal>
+      </Portal>
+
+      {/* Modal ver */}
+      <Portal>
+        <Modal visible={viewOpen} onDismiss={() => setViewOpen(false)} contentContainerStyle={styles.modal}>
+          <Text variant="titleMedium" style={{ marginBottom: 10 }}>Detalle de programación</Text>
+          <Detail label="Paciente" value={viewRow?.pacienteNombre} />
+          <Detail label="Medicamento" value={viewRow?.medicamentoNombre} />
+          <Detail label="Médico" value={viewRow?.medicoNombre} />
+          <Detail label="Cantidad" value={String(viewRow?.cantidadPorToma ?? '')} />
+          <Detail label="Tipo" value={viewRow?.tipo === 'cadax' ? `cada ${viewRow?.intervaloHoras} horas` : viewRow?.tipo} />
+          <Detail label="Inicio" value={viewRow?.inicio?.replace?.('T',' ') || '—'} />
+          {viewRow?.tipo === 'semanal' && (<><Detail label="Días" value={(viewRow?.diasSemana || []).join(', ')} /><Detail label="Hora" value={viewRow?.horaSemanal} /></>)}
+          {viewRow?.tipo === 'postcomida' && (<><Detail label="Desayuno" value={viewRow?.times?.desayuno || '—'} /><Detail label="Almuerzo" value={viewRow?.times?.almuerzo || '—'} /><Detail label="Cena" value={viewRow?.times?.cena || '—'} /></>)}
+          <Detail label="Estado" value={viewRow?.estado || (viewRow?.activo ? 'programado' : 'pausado')} />
+          <Detail label="Inventario ID" value={viewRow?.inventarioId || slug(viewRow?.medicamentoNombre || '')} />
+          <Detail label="Notas" value={viewRow?.notas} />
+          <Detail label="Creado" value={fmtDateTime(viewRow?.createdAt)} />
+          <Detail label="Actualizado" value={fmtDateTime(viewRow?.updatedAt)} />
+          <View style={{ alignItems: 'flex-end', marginTop: 12 }}>
+            <Button onPress={() => setViewOpen(false)}>Cerrar</Button>
           </View>
         </Modal>
       </Portal>
@@ -291,25 +767,99 @@ export default function MedicamentoAgregar() {
   );
 }
 
+/* ========= Subcomponentes ========= */
+function Detail({ label, value }) {
+  return (
+    <View style={{ flexDirection: 'row', marginBottom: 6 }}>
+      <Text style={{ width: 160, color: '#6B7C87' }}>{label}:</Text>
+      <Text style={{ flex: 1, fontWeight: '600' }}>{value || '—'}</Text>
+    </View>
+  );
+}
+function RadioRow({ value, onChange }) {
+  return (
+    <RadioButton.Group onValueChange={onChange} value={value}>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+        <Chip selected={value === 'unico'} onPress={() => onChange('unico')}>Único</Chip>
+        <Chip selected={value === 'cadax'} onPress={() => onChange('cadax')}>Cada X horas</Chip>
+        <Chip selected={value === 'semanal'} onPress={() => onChange('semanal')}>Semanal</Chip>
+        <Chip selected={value === 'postcomida'} onPress={() => onChange('postcomida')}>Después de comida</Chip>
+      </View>
+    </RadioButton.Group>
+  );
+}
+function AutoSelect({ label, value, onClear, data, getLabel, onSelect }) {
+  const [open, setOpen] = useState(false);
+  const [s, setS] = useState('');
+  const list = useMemo(() => {
+    const q = s.trim().toLowerCase();
+    const arr = data || [];
+    if (!q) return arr;
+    return arr.filter((x) => (getLabel(x) || '').toLowerCase().includes(q));
+  }, [s, data, getLabel]);
+
+  return (
+    <View style={{ marginBottom: 10 }}>
+      <Text style={{ marginBottom: 4, color: '#6B7C87' }}>{label}</Text>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+        <TextInput style={{ flex: 1 }} value={value} editable={false} placeholder="Seleccione…" />
+        <IconButton icon="close" onPress={onClear} />
+        <Button mode="outlined" onPress={() => setOpen(true)}>Elegir</Button>
+      </View>
+
+      <Portal>
+        <Modal visible={open} onDismiss={() => setOpen(false)} contentContainerStyle={styles.picker}>
+          <Text variant="titleMedium" style={{ marginBottom: 8 }}>{label}</Text>
+          <Searchbar placeholder="Buscar…" value={s} onChangeText={setS} style={{ marginBottom: 8 }} />
+          <Card>
+            <Card.Content style={{ paddingTop: 0 }}>
+              <View style={{ maxHeight: 360 }}>
+                <FlatList
+                  data={list}
+                  keyExtractor={(it, i) => it.id || String(i)}
+                  ItemSeparatorComponent={() => <Divider />}
+                  renderItem={({ item }) => (
+                    <List.Item title={getLabel(item)} onPress={() => { onSelect(item); setOpen(false); }} />
+                  )}
+                />
+              </View>
+            </Card.Content>
+          </Card>
+          <View style={{ alignItems: 'flex-end', marginTop: 8 }}>
+            <Button onPress={() => setOpen(false)}>Cerrar</Button>
+          </View>
+        </Modal>
+      </Portal>
+    </View>
+  );
+}
+function WeekdayChips({ selected = [], onToggle }) {
+  const days = [
+    { n: 0, t: 'Dom' }, { n: 1, t: 'Lun' }, { n: 2, t: 'Mar' },
+    { n: 3, t: 'Mié' }, { n: 4, t: 'Jue' }, { n: 5, t: 'Vie' }, { n: 6, t: 'Sáb' },
+  ];
+  const toggle = (n) => {
+    const has = selected.includes(n);
+    const next = has ? selected.filter(x => x !== n) : [...selected, n];
+    onToggle(next.sort());
+  };
+  return (
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+      {days.map(d => (
+        <Chip key={d.n} selected={selected.includes(d.n)} onPress={() => toggle(d.n)}>{d.t}</Chip>
+      ))}
+    </View>
+  );
+}
+
+/* ========= Styles ========= */
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 12 },
   card: { borderRadius: 16 },
   center: { alignItems: 'center', paddingVertical: 16 },
-  fab: { position: 'absolute', right: 16, bottom: 16 },
-
-  itemRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: 12, backgroundColor: '#FFFFFF' },
-  itemBody: { flex: 1 },
-  itemHeader: { flexDirection: 'row', alignItems: 'center' },
-  itemTitle: { flex: 1, fontWeight: '600', fontSize: 16, color: '#0F172A' },
-  itemDate: { marginLeft: 8, color: '#64748B', fontSize: 12 },
-  itemSub: { marginTop: 2, color: '#607D8B' },
-
-  qtyPill: {
-    minWidth: 40, height: 28, paddingHorizontal: 8, borderRadius: 999,
-    backgroundColor: '#E3F2FD', alignItems: 'center', justifyContent: 'center',
-    marginHorizontal: 10,
-  },
-
   modal: { margin: 16, backgroundColor: 'white', padding: 16, borderRadius: 16, maxHeight: '90%' },
+  picker: { margin: 16, backgroundColor: 'white', padding: 16, borderRadius: 16, maxHeight: '80%' },
+  section: { marginTop: 6, marginBottom: 6, fontWeight: '700' },
   input: { marginBottom: 10 },
+  fab: { position: 'absolute', right: 16, bottom: 16, borderRadius: 24 },
 });
